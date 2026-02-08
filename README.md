@@ -1,123 +1,186 @@
 # WarpDrive Forge
 
-WarpDrive Forge is a demo workload that shows how WarpDrive can serve globally replicated datasets to training-style jobs. The binary reads COCO-style WebDataset shards from WarpDrive-mounted POSIX paths in canadacentral (even shards) and westus3 (odd shards) simultaneously, exercising cross-region cache coherence without any Azure SDK calls. The training loop is pure Go: WebDataset shard streaming, deterministic multi-root sampling, CPU-only preprocessing, and a tiny SGD classifier that you can later swap for DGX-friendly code with minimal plumbing changes.
+A Go training workload that demonstrates [WarpDrive](https://github.com/vpatelsj/WarpDrive) serving globally replicated datasets to ML-style jobs via FUSE. The binary reads COCO-style WebDataset TAR shards from WarpDrive-mounted POSIX paths — even shards from Canada Central, odd shards from West US 3 — exercising cross-region data access with zero Azure SDK calls. All storage semantics are delegated to WarpDrive.
 
-## Repo layout
-- `cmd/warpdrive-forge/`: CLI entry point and signal handling.
-- `internal/config`: strict YAML loader + CLI overrides.
-- `internal/dataset`: shard discovery, TAR pairing, and deterministic sampler workers.
-- `internal/model`: simple softmax classifier to keep CPU busy.
-- `internal/trainer`: end-to-end loop with batching, preprocessing, metrics.
-- `internal/metrics`: sliding-window throughput and latency stats.
-- `configs/demo.yaml`: canadacentral + westus3 defaults with even/odd shard split.
-- `demo/`: ready-to-run scripts for cold cache, warm cache, and WarpDrive metrics tailing.
+## Architecture
+
+```
+┌──────────────────────────────────────────────────────────────────┐
+│  Azure VM  (Ubuntu 24.04, Standard_D4s_v5)                      │
+│                                                                  │
+│  warpdrive-forge ──▸ /wd/datasets-cac/train/shard-000000.tar    │
+│       (training)     /wd/datasets-wus3/train/shard-000001.tar    │
+│            │                    ▲                                 │
+│            │                    │  FUSE                           │
+│            │         ┌──────────┴──────────┐                     │
+│            │         │  warpdrive-mount    │                     │
+│            │         │  :9090 /metrics     │                     │
+│            │         └────┬──────────┬─────┘                     │
+│            │              │          │                            │
+└────────────┼──────────────┼──────────┼───────────────────────────┘
+             │              │          │
+             │    ┌─────────▼─┐  ┌─────▼──────────┐
+             │    │ Azure Blob│  │  Azure Blob    │
+             │    │ Canada    │  │  West US 3     │
+             │    │ Central   │  │                │
+             │    │ (even)    │  │  (odd shards)  │
+             │    └───────────┘  └────────────────┘
+             │
+             ▼
+     stdout: step=100 images/s=920.4 loss=1.83
+```
+
+## Repo Layout
+
+```
+cmd/warpdrive-forge/     CLI entry point with signal handling
+internal/
+  config/                Strict YAML loader + CLI overrides
+  dataset/               Shard discovery, TAR pairing, deterministic sampler
+  model/                 Simple softmax classifier (CPU-only)
+  trainer/               Training loop with batching, preprocessing, metrics
+  metrics/               Sliding-window throughput & latency stats
+configs/demo.yaml        Default training config
+demo/                    Ready-to-run scripts (cold, warm, metrics tailing)
+infra/                   Azure provisioning & deployment scripts (00–06)
+```
 
 ## Prerequisites
 
-| Component | Version |
-|-----------|---------|
-| Azure CLI | >= 2.50 |
-| Go | >= 1.22 (forge), >= 1.24 (WarpDrive) |
-| OS (VM) | Ubuntu 24.04 LTS |
-| FUSE | fuse3 / libfuse3-dev (installed by setup script) |
-| Python 3 | For synthetic dataset generation (with Pillow recommended) |
-| Azure subscription | With permissions to create resource groups, storage accounts, VMs, and role assignments |
+| Component | Version | Notes |
+|-----------|---------|-------|
+| Azure CLI | >= 2.50 | `brew install azure-cli` (macOS) |
+| Go | >= 1.22 (forge), >= 1.24 (WarpDrive) | |
+| OS (VM) | Ubuntu 24.04 LTS | Installed by provisioning script |
+| FUSE | fuse3 / libfuse3-dev | Installed by setup script |
+| Python 3 | >= 3.8 | For synthetic dataset generation |
+| Azure subscription | — | Permissions for RG, storage, VM, RBAC |
 
-## End-to-end deployment
+## Quick Start — End-to-End Deployment
 
-The `infra/` directory contains numbered scripts that provision Azure resources, generate a synthetic dataset, install WarpDrive on a VM, and run the training workload. Run them in order:
+> Full step-by-step guide with architecture details: [DEPLOY.md](DEPLOY.md)
 
-### Step 1 — Provision Azure infrastructure (from your laptop)
+### From your laptop
+
 ```bash
-# Log in to Azure (if not already)
 az login
+source infra/00-env.sh          # set shared variables
 
-# Create resource group, two storage accounts (canadacentral + westus3),
-# a Linux VM with system-assigned managed identity, and RBAC role assignments.
-./infra/01-provision.sh
+./infra/01-provision.sh          # create Azure RG, storage, VM, RBAC
+./infra/02-gen-dataset.sh        # generate & upload 20 WebDataset shards
+
+# Copy repo to the VM
+scp -r . azureuser@$VM_IP:~/warpdrive-forge
+ssh azureuser@$VM_IP
 ```
-This creates:
-- Resource group `warpdrive-forge-rg`
-- Storage account in **Canada Central** (even-numbered shards)
-- Storage account in **West US 3** (odd-numbered shards)
-- Ubuntu 24.04 VM (`Standard_D4s_v5`) with managed identity
-- `Storage Blob Data Reader` role on both storage accounts
 
-### Step 2 — Generate & upload synthetic dataset (from your laptop)
-```bash
-./infra/02-gen-dataset.sh
-```
-Generates COCO-style WebDataset TAR shards (`.jpg` + `.cls` pairs) and uploads even shards to Canada Central, odd shards to West US 3.
+### On the VM
 
-### Step 3 — Set up the VM (on the VM)
 ```bash
-ssh azureuser@<VM_IP>
-# Copy the repo to the VM (or clone it)
-# Then run:
-./infra/03-vm-setup.sh
-```
-Installs Go 1.24, FUSE, clones and builds [WarpDrive](https://github.com/vpatelsj/WarpDrive), and builds warpdrive-forge.
-
-### Step 4 — Generate WarpDrive config (on the VM)
-```bash
+# Set storage account names (from infra/.env.generated on your laptop)
 export STORAGE_ACCOUNT_A="<canadacentral account name>"
 export STORAGE_ACCOUNT_B="<westus3 account name>"
-./infra/04-gen-warpdrive-config.sh
-```
-Writes `/etc/warpdrive/config.yaml` with two `azureblob` backends using managed identity auth, mounting to `/wd/datasets-cac/` and `/wd/datasets-wus3/`.
 
-### Step 5 — Run the training workload (on the VM)
-```bash
-./infra/05-run.sh
+./infra/03-vm-setup.sh                # install Go 1.24, FUSE, build everything
+./infra/04-gen-warpdrive-config.sh    # write /etc/warpdrive/config.yaml
+./infra/05-run.sh                     # mount → warm cache → train → metrics snapshot
 ```
-This script:
-1. Starts `warpdrive-mount` (FUSE) in the background
-2. Optionally warms the cache with `warpdrive-ctl warm`
-3. Runs `warpdrive-forge` training against the mounted POSIX paths
-4. Unmounts cleanly on completion
 
 ### Teardown
+
 ```bash
-./infra/06-teardown.sh   # Deletes the entire resource group
+./infra/06-teardown.sh               # deletes the entire resource group
 ```
 
-## Quick start (on a pre-configured VM)
-If WarpDrive is already mounted at `/wd/`:
+## WarpDrive Config — Key Settings
+
+The config generated by `04-gen-warpdrive-config.sh` uses rclone's azureblob provider under the hood. These settings are **required** for correct operation:
+
+| Key | Value | Why |
+|-----|-------|-----|
+| `root` | `coco2017-wds` | WarpDrive maps this to rclone's `remotePath` (not `container`) |
+| `chunk_size` | `"4194304"` | rclone azureblob requires non-zero chunk size |
+| `list_chunk` | `"5000"` | Prevents `maxresults=0` query parameter error |
+| `env_auth` | `"true"` | Let rclone handle Azure auth directly |
+| `use_msi` | `"true"` | Enable managed identity authentication |
+
+## Usage
+
 ```bash
-go build -o warpdrive-forge ./cmd/warpdrive-forge
+# Build
+go build -o bin/warpdrive-forge ./cmd/warpdrive-forge
 
-# Cold run: first touch of shards through WarpDrive caches
-./demo/01_train_cold.sh
+# Run (with WarpDrive already mounted at /wd)
+bin/warpdrive-forge \
+  -config configs/demo.yaml \
+  -train-root-a /wd/datasets-cac/train \
+  -train-root-b /wd/datasets-wus3/train \
+  -steps 200 -batch-size 16 -num-workers 4 -seed 42
+```
 
-# Warm run: repeat to highlight cache hit rates
-./demo/02_train_warm.sh
+### CLI Flags
 
-# Tail WarpDrive metrics while runs execute
+| Flag | Default | Description |
+|------|---------|-------------|
+| `-config` | `configs/demo.yaml` | Path to YAML config |
+| `-train-root-a` | from config | POSIX path to even-shard root |
+| `-train-root-b` | from config | POSIX path to odd-shard root |
+| `-steps` | 2000 | Number of training steps |
+| `-batch-size` | 64 | Batch size |
+| `-num-workers` | 8 | Data loader worker goroutines |
+| `-seed` | 42 | PRNG seed for reproducibility |
+| `-log-every` | 100 | Print metrics every N steps |
+
+## WarpDrive Metrics
+
+WarpDrive exposes Prometheus metrics at `:9090/metrics`. Key counters:
+
+| Metric | Description |
+|--------|-------------|
+| `warpdrive_fuse_operations_total` | FUSE ops by type (read, lookup, readdir) |
+| `warpdrive_fuse_operation_duration_seconds` | FUSE latency histogram |
+| `warpdrive_cache_hit_total` / `cache_miss_total` | Cache hit/miss counts |
+| `warpdrive_backend_bytes_read_total` | Bytes read per backend |
+| `warpdrive_backend_request_duration_seconds` | Backend latency (list, stat, read) |
+| `warpdrive_auth_refresh_total` | Credential refresh events |
+
+Monitor during training:
+
+```bash
+watch -n2 'curl -s http://localhost:9090/metrics | grep "^warpdrive_"'
+# Or use the included script:
 ./demo/03_watch_warpdrive_metrics.sh
 ```
-Each training script records stdout under `demo/logs/{cold,warm}.log` with periodic lines such as:
-```
-step=100 images_per_sec=920.4 data_ms=12.5 compute_ms=8.1 loss=1.8324
-```
 
-## Configuration
-- Default CLI flags (and `configs/demo.yaml`) point to `/wd/datasets-cac/coco2017-wds/train` for even-numbered `shard-*.tar` files and `/wd/datasets-wus3/coco2017-wds/train` for odd ones. Add shards at either root whenever WarpDrive ingests more data—the discovery phase re-indexes on every run, so no code change is required.
-- Override any flag explicitly, e.g. `./warpdrive-forge --config configs/demo.yaml --steps 500 --batch-size 32`.
-- All reads go through POSIX mounts (`/wd/...`). There are zero Azure SDK or cloud API calls in this repo; storage semantics are entirely delegated to [WarpDrive](https://github.com/vpatelsj/WarpDrive).
+## Observed Performance (20-shard demo)
 
-## Logging & metrics
-- The trainer prints throughput, average data loading time, average compute time, and loss every `log_every` steps (default 100). These stats come from the sliding window in `internal/metrics`.
-- `demo/03_watch_warpdrive_metrics.sh` continuously curls `http://localhost:9090/metrics` (override via `WARPDRIVE_METRICS_URL`) and filters out cache/backend/fetch/readahead/latency lines for quick health checks.
-- For DGX migrations, reuse the same POSIX readers; swap `internal/model/simplecnn.go` with your GPU-backed implementation and the rest of the pipeline stays intact.
+From a live training run on `Standard_D4s_v5` (200 steps, batch 16, 4 workers):
 
-## Infra scripts reference
+| Metric | Value |
+|--------|-------|
+| Total FUSE reads | **1,001,187** |
+| Mean FUSE read latency | **154 μs** |
+| P99.5 FUSE read latency | < 500 μs |
+| Cache hit rate | **100%** |
+| Backend data read (CAC) | 24.0 GB |
+| Backend data read (WUS3) | 24.0 GB |
+| Backend I/O errors | **0** |
+| Auth method | Managed Identity (Entra) |
+
+## Infra Scripts Reference
 
 | Script | Where | Description |
 |--------|-------|-------------|
-| `infra/00-env.sh` | Laptop | Shared environment variables (customizable) |
-| `infra/01-provision.sh` | Laptop | Create Azure RG, storage accounts, VM, RBAC |
-| `infra/02-gen-dataset.sh` | Laptop | Generate synthetic WebDataset shards & upload |
-| `infra/03-vm-setup.sh` | VM | Install Go, FUSE, build WarpDrive + forge |
-| `infra/04-gen-warpdrive-config.sh` | VM | Write WarpDrive YAML config |
-| `infra/05-run.sh` | VM | Mount WarpDrive, warm cache, run training |
-| `infra/06-teardown.sh` | Laptop | Delete all Azure resources |
+| `00-env.sh` | Laptop | Shared environment variables (customizable) |
+| `01-provision.sh` | Laptop | Create Azure RG, storage accounts, VM, RBAC |
+| `02-gen-dataset.sh` | Laptop | Generate synthetic WebDataset shards & upload |
+| `03-vm-setup.sh` | VM | Install Go, FUSE, build WarpDrive + forge into `bin/` |
+| `04-gen-warpdrive-config.sh` | VM | Write WarpDrive YAML config with rclone-compatible keys |
+| `05-run.sh` | VM | Clean stale mounts, mount, warm cache, train, print metrics |
+| `06-teardown.sh` | Laptop | Delete all Azure resources |
+
+## Design Notes
+
+- **Zero cloud SDK calls** — all reads go through POSIX mounts (`/wd/...`). Swap in any FUSE-compatible filesystem and the training code works unchanged.
+- **Deterministic sampling** — the multi-root sampler interleaves shards across regions with a seeded PRNG, ensuring reproducible training regardless of cloud topology.
+- **GPU-ready** — replace `internal/model/simplecnn.go` with a GPU-backed implementation and the data pipeline stays intact. The POSIX interface means no plumbing changes for DGX migrations.
