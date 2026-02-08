@@ -1,0 +1,7 @@
+train_root_a: /wd/datasets-cac/coco2017-wds/train
+train_root_b: /wd/datasets-wus3/coco2017-wds/train
+steps: 2000
+batch_size: 64
+num_workers: 8
+seed: 42
+log_every: 100

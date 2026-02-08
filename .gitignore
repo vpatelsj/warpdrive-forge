@@ -1,0 +1,40 @@
+# ── Binaries ──────────────────────────────────────────────────
+bin/
+*.exe
+*.out
+warpdrive-forge
+
+# ── Go build caches ──────────────────────────────────────────
+.gocache/
+vendor/
+
+# ── Secrets & generated environment files ─────────────────────
+infra/.env.generated
+*.env
+*.env.*
+!*.env.example
+
+# ── SSH keys ──────────────────────────────────────────────────
+*.pem
+*.key
+id_rsa*
+id_ed25519*
+
+# ── WarpDrive runtime files ──────────────────────────────────
+infra/fix-and-run.sh
+
+# ── OS / editor artifacts ────────────────────────────────────
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# ── Logs ──────────────────────────────────────────────────────
+*.log
+
+# ── Temporary / scratch ──────────────────────────────────────
+tmp/
+*.tmp
