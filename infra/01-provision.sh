@@ -83,8 +83,7 @@ VM_PRINCIPAL_ID=$(az vm show \
   --query identity.principalId -o tsv)
 echo "    VM principal ID: $VM_PRINCIPAL_ID"
 
-# ── Role assignments (VM: Reader, Current user: Contributor) ─
-BLOB_READER_ROLE="Storage Blob Data Reader"
+# ── Role assignments (VM: Contributor for upload+read, Current user: Contributor) ─
 BLOB_CONTRIBUTOR_ROLE="Storage Blob Data Contributor"
 CURRENT_USER_ID=$(az ad signed-in-user show --query id -o tsv 2>/dev/null || true)
 
@@ -94,16 +93,16 @@ for ACCT in "$STORAGE_ACCOUNT_A" "$STORAGE_ACCOUNT_B"; do
     --resource-group "$RESOURCE_GROUP" \
     --query id -o tsv)
 
-  echo "==> Assigning '$BLOB_READER_ROLE' on $ACCT to VM"
+  echo "==> Assigning '$BLOB_CONTRIBUTOR_ROLE' on $ACCT to VM (read + upload)"
   az role assignment create \
     --assignee-object-id "$VM_PRINCIPAL_ID" \
     --assignee-principal-type ServicePrincipal \
-    --role "$BLOB_READER_ROLE" \
+    --role "$BLOB_CONTRIBUTOR_ROLE" \
     --scope "$SCOPE" \
     --output none
 
   if [[ -n "$CURRENT_USER_ID" ]]; then
-    echo "==> Assigning '$BLOB_CONTRIBUTOR_ROLE' on $ACCT to current user (for uploads)"
+    echo "==> Assigning '$BLOB_CONTRIBUTOR_ROLE' on $ACCT to current user"
     az role assignment create \
       --assignee-object-id "$CURRENT_USER_ID" \
       --assignee-principal-type User \
@@ -135,10 +134,11 @@ cat <<EOF
 ╚══════════════════════════════════════════════════════════╝
 
 Next steps:
-  1. Upload dataset:  ./infra/02-gen-dataset.sh
-  2. SSH into VM:     ssh $ADMIN_USER@$VM_IP
-  3. Run VM setup:    ./infra/03-vm-setup.sh   (on the VM)
-  4. Start WarpDrive: ./infra/05-run.sh        (on the VM)
+  1. SSH into VM:     ssh $ADMIN_USER@$VM_IP
+  2. Run VM setup:    ./infra/03-vm-setup.sh   (on the VM)
+  3. Gen dataset:     ./infra/02-gen-dataset.sh (on the VM — fast Azure-internal upload)
+  4. Gen WD config:   ./infra/04-gen-warpdrive-config.sh (on the VM)
+  5. Run showcase:    ./infra/05-run.sh         (on the VM)
 EOF
 
 # Persist dynamic names for other scripts
