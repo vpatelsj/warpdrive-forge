@@ -1,7 +1,10 @@
-train_root_a: /wd/datasets-cac/coco2017-wds/train
-train_root_b: /wd/datasets-wus3/coco2017-wds/train
-steps: 2000
-batch_size: 64
-num_workers: 8
+# Default config — overridden by CLI flags in the showcase script.
+# The paths here assume WarpDrive is mounted at /wd with root=coco2017-wds,
+# so the actual mount path is /wd/<backend>/train (no coco2017-wds prefix).
+train_root_a: /wd/datasets-cac/train
+train_root_b: /wd/datasets-wus3/train
+steps: 200
+batch_size: 16
+num_workers: 4
 seed: 42
-log_every: 100
+log_every: 50
