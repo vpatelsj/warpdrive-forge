@@ -327,23 +327,136 @@ echo ""
 # ── Governance ───────────────────────────────────────────────
 banner "WarpDrive Observability & Governance"
 
-echo -e "  ${BOLD}Prometheus Metrics (http://localhost:9090/metrics)${RESET}\n"
+# ─────────────────────────  PROMETHEUS DASHBOARD  ─────────────────────────
+echo -e "  ${BOLD}┌─ Prometheus Metrics Dashboard  (http://localhost:9090/metrics)${RESET}"
+echo -e "  ${BOLD}│${RESET}"
 
-# Show a curated subset of metrics
-echo -e "  ${DIM}Key Prometheus counters (cumulative across both phases):${RESET}"
-metric "FUSE reads total"      "$(safe_val "$(grab_metric 'warpdrive_fuse_operations_total{operation="read"}')")"
-metric "Cache hits total"      "$(safe_val "$(grab_metric 'warpdrive_cache_hit_total')")"
-metric "Cache misses total"    "$(safe_val "$(grab_metric 'warpdrive_cache_miss_total')")"
-metric "Backend errors total"  "$(safe_val "$(grab_metric 'warpdrive_backend_errors_total')")"
+# FUSE operations breakdown
+echo -e "  ${BOLD}│  FUSE Operations${RESET}"
+FUSE_READS=$(safe_val "$(grab_metric 'warpdrive_fuse_operations_total{operation="read"}')")
+FUSE_LOOKUPS=$(safe_val "$(grab_metric 'warpdrive_fuse_operations_total{operation="lookup"}')")
+FUSE_READDIRS=$(safe_val "$(grab_metric 'warpdrive_fuse_operations_total{operation="readdir"}')")
+echo -e "  ${BOLD}│${RESET}    ${YELLOW}read${RESET}    $FUSE_READS        ${YELLOW}lookup${RESET}  $FUSE_LOOKUPS        ${YELLOW}readdir${RESET}  $FUSE_READDIRS"
+
+# FUSE latency distribution
+echo -e "  ${BOLD}│${RESET}"
+echo -e "  ${BOLD}│  FUSE Read Latency Histogram${RESET}"
+FUSE_DUR_SUM=$(safe_val "$(grab_histogram_sum 'warpdrive_fuse_operation_duration_seconds{operation="read"')")
+FUSE_DUR_COUNT=$(safe_val "$(grab_histogram_count 'warpdrive_fuse_operation_duration_seconds{operation="read"')")
+if (( $(echo "$FUSE_DUR_COUNT > 0" | bc -l 2>/dev/null || echo 0) )); then
+  FUSE_MEAN_US=$(echo "$FUSE_DUR_SUM $FUSE_DUR_COUNT" | awk '{printf "%.0f", ($1/$2)*1000000}')
+else
+  FUSE_MEAN_US="0"
+fi
+# Parse histogram buckets for a visual bar chart
+HIST_100us=$(safe_val "$(curl -s "$METRICS_URL" 2>/dev/null | grep 'warpdrive_fuse_operation_duration_seconds_bucket{operation="read",le="0.0001"}' | awk '{print $2}')")
+HIST_500us=$(safe_val "$(curl -s "$METRICS_URL" 2>/dev/null | grep 'warpdrive_fuse_operation_duration_seconds_bucket{operation="read",le="0.0005"}' | awk '{print $2}')")
+HIST_1ms=$(safe_val "$(curl -s "$METRICS_URL" 2>/dev/null | grep 'warpdrive_fuse_operation_duration_seconds_bucket{operation="read",le="0.001"}' | awk '{print $2}')")
+HIST_5ms=$(safe_val "$(curl -s "$METRICS_URL" 2>/dev/null | grep 'warpdrive_fuse_operation_duration_seconds_bucket{operation="read",le="0.005"}' | awk '{print $2}')")
+HIST_10ms=$(safe_val "$(curl -s "$METRICS_URL" 2>/dev/null | grep 'warpdrive_fuse_operation_duration_seconds_bucket{operation="read",le="0.01"}' | awk '{print $2}')")
+HIST_50ms=$(safe_val "$(curl -s "$METRICS_URL" 2>/dev/null | grep 'warpdrive_fuse_operation_duration_seconds_bucket{operation="read",le="0.05"}' | awk '{print $2}')")
+HIST_INF=$(safe_val "$(curl -s "$METRICS_URL" 2>/dev/null | grep 'warpdrive_fuse_operation_duration_seconds_bucket{operation="read",le="+Inf"}' | awk '{print $2}')")
+
+bar_chart() {
+  local val=$1 total=$2 label=$3 width=30
+  if [[ "$total" == "0" ]] || [[ -z "$total" ]]; then
+    printf "  │    %-8s │%${width}s│ %s\n" "$label" "" "0"
+    return
+  fi
+  local filled=$(echo "$val $total $width" | awk '{if($2>0) printf "%.0f", ($1/$2)*$3; else print 0}')
+  local bar=""
+  for ((i=0; i<filled; i++)); do bar+="█"; done
+  for ((i=filled; i<width; i++)); do bar+=" "; done
+  printf "  ${BOLD}│${RESET}    ${DIM}%-8s${RESET} │${GREEN}%-${width}s${RESET}│ %s\n" "$label" "$bar" "$val"
+}
+
+bar_chart "$HIST_100us" "$HIST_INF" "≤100μs"
+bar_chart "$(echo "$HIST_500us $HIST_100us" | awk '{print $1-$2}')" "$HIST_INF" "≤500μs"
+bar_chart "$(echo "$HIST_1ms $HIST_500us" | awk '{print $1-$2}')" "$HIST_INF" "≤1ms"
+bar_chart "$(echo "$HIST_5ms $HIST_1ms" | awk '{print $1-$2}')" "$HIST_INF" "≤5ms"
+bar_chart "$(echo "$HIST_50ms $HIST_5ms" | awk '{print $1-$2}')" "$HIST_INF" "≤50ms"
+bar_chart "$(echo "$HIST_INF $HIST_50ms" | awk '{print $1-$2}')" "$HIST_INF" ">50ms"
+echo -e "  ${BOLD}│${RESET}    ${DIM}Mean: ${FUSE_MEAN_US} μs across $FUSE_DUR_COUNT reads${RESET}"
+
+# Cache statistics
+echo -e "  ${BOLD}│${RESET}"
+echo -e "  ${BOLD}│  Cache${RESET}"
+CACHE_HITS=$(safe_val "$(grab_metric 'warpdrive_cache_hit_total')")
+CACHE_MISSES=$(safe_val "$(grab_metric 'warpdrive_cache_miss_total')")
+CACHE_EVICTIONS=$(safe_val "$(grab_metric 'warpdrive_cache_evictions_total')")
+CACHE_SIZE=$(safe_val "$(grab_metric 'warpdrive_cache_size_bytes')")
+CACHE_UTIL=$(safe_val "$(grab_metric 'warpdrive_cache_utilization_ratio')")
+CACHE_SIZE_MB=$(echo "$CACHE_SIZE" | awk '{printf "%.1f", $1/1048576}')
+CACHE_UTIL_PCT=$(echo "$CACHE_UTIL" | awk '{printf "%.1f%%", $1*100}')
+CACHE_TOTAL=$((CACHE_HITS + CACHE_MISSES))
+if (( CACHE_TOTAL > 0 )); then
+  CACHE_HIT_PCT=$(echo "$CACHE_HITS $CACHE_TOTAL" | awk '{printf "%.1f%%", ($1/$2)*100}')
+else
+  CACHE_HIT_PCT="N/A"
+fi
+echo -e "  ${BOLD}│${RESET}    ${YELLOW}hits${RESET}  $CACHE_HITS   ${YELLOW}misses${RESET}  $CACHE_MISSES   ${YELLOW}evictions${RESET}  $CACHE_EVICTIONS"
+echo -e "  ${BOLD}│${RESET}    ${YELLOW}hit rate${RESET}  $CACHE_HIT_PCT        ${YELLOW}cache used${RESET}  ${CACHE_SIZE_MB} MB ($CACHE_UTIL_PCT)"
+
+# Readahead
+echo -e "  ${BOLD}│${RESET}"
+echo -e "  ${BOLD}│  Readahead${RESET}"
+RA_HIT=$(safe_val "$(grab_metric 'warpdrive_readahead_hit_total')")
+RA_WASTE=$(safe_val "$(grab_metric 'warpdrive_readahead_wasted_total')")
+echo -e "  ${BOLD}│${RESET}    ${YELLOW}prefetch hits${RESET}  $RA_HIT        ${YELLOW}wasted${RESET}  $RA_WASTE"
+
+# Backend
+echo -e "  ${BOLD}│${RESET}"
+echo -e "  ${BOLD}│  Backend I/O${RESET}"
+BE_BYTES=$(safe_val "$(grab_metric 'warpdrive_backend_bytes_read_total{backend=""}')")
+BE_ERRORS=$(safe_val "$(grab_metric 'warpdrive_backend_errors_total{backend="",error_type="io"}')")
+BE_BYTES_MB=$(echo "$BE_BYTES" | awk '{printf "%.1f", $1/1048576}')
+BE_DUR_COUNT=$(safe_val "$(grab_histogram_count 'warpdrive_backend_request_duration_seconds{backend="",operation="read"')")
+echo -e "  ${BOLD}│${RESET}    ${YELLOW}bytes fetched${RESET}  ${BE_BYTES_MB} MB   ${YELLOW}requests${RESET}  $BE_DUR_COUNT   ${YELLOW}errors${RESET}  $BE_ERRORS"
+
+# Auth
+echo -e "  ${BOLD}│${RESET}"
+echo -e "  ${BOLD}│  Auth${RESET}"
+AUTH_OK=$(safe_val "$(grab_metric 'warpdrive_auth_refresh_total{provider="",status="success"}')")
+echo -e "  ${BOLD}│${RESET}    ${YELLOW}credential refreshes${RESET}  $AUTH_OK  (managed identity / Entra ID)"
+
+echo -e "  ${BOLD}│${RESET}"
+echo -e "  ${BOLD}└──────────────────────────────────────────────────────────────${RESET}"
+echo ""
+
+echo -e "  ${DIM}Full Prometheus endpoint is scrapable by Grafana, Datadog, etc.${RESET}"
+echo -e "  ${DIM}$ curl -s http://localhost:9090/metrics | grep warpdrive${RESET}"
+echo ""
+
+
+
+# ── Cleanup & post-unmount governance ────────────────────────
+banner "Data Governance (warpdrive-ctl)"
+
+echo -e "  Unmounting WarpDrive to release cache lock for governance …"
+sudo umount "$WD_MOUNT_POINT" 2>/dev/null || \
+  sudo fusermount -uz "$WD_MOUNT_POINT" 2>/dev/null || true
+wait "$MOUNT_PID" 2>/dev/null || true
+sleep 1
+info "WarpDrive unmounted."
 echo ""
 
 if [[ -x "$CTL_BIN" ]]; then
-  echo -e "  ${BOLD}warpdrive-ctl${RESET} — data-governance & management CLI\n"
-  for cmd in status usage; do
-    echo -e "  ${DIM}\$ warpdrive-ctl $cmd${RESET}"
-    sudo "$CTL_BIN" "$cmd" -config "$CONFIG_PATH" 2>&1 | sed 's/^/    /' || dim "(locked by mount — try after unmount)"
+  for cmd in stats usage stale; do
+    echo -e "  ${BOLD}\$ warpdrive-ctl $cmd -config $CONFIG_PATH${RESET}"
+    hr
+    sudo "$CTL_BIN" "$cmd" -config "$CONFIG_PATH" 2>&1 \
+      | grep -v "^$" | grep -v "^warpdrive-ctl" | sed 's/^/    /' \
+      || dim "(no output)"
     echo ""
   done
+
+  echo -e "  ${BOLD}Other available commands:${RESET}"
+  echo -e "    ${YELLOW}warpdrive-ctl warm${RESET}    Pre-populate cache for a path"
+  echo -e "    ${YELLOW}warpdrive-ctl quota${RESET}   Manage per-team storage quotas"
+  echo -e "    ${YELLOW}warpdrive-ctl move${RESET}    Move/copy data between backends"
+  echo -e "    ${YELLOW}warpdrive-ctl status${RESET}  Show mount + control-plane health"
+  echo -e "    ${YELLOW}warpdrive-ctl serve${RESET}   Start the control-plane server"
+  echo ""
 fi
 
 
@@ -380,10 +493,5 @@ echo ""
 
 
 
-# ── Cleanup ──────────────────────────────────────────────────
-info "Unmounting WarpDrive …"
-sudo umount "$WD_MOUNT_POINT" 2>/dev/null || \
-  sudo fusermount -uz "$WD_MOUNT_POINT" 2>/dev/null || true
-wait "$MOUNT_PID" 2>/dev/null || true
-info "Done."
+info "Showcase complete."
 echo ""

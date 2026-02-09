@@ -13,7 +13,7 @@ import (
 
 const featureGrid = 16
 const featureSize = featureGrid * featureGrid
-const numClasses = 1000
+const numClasses = 10
 
 // RunConfig captures the knobs required by the training loop.
 type RunConfig struct {

@@ -26,7 +26,7 @@ export NUM_SHARDS="${NUM_SHARDS:-100}"                   # total shard count (sp
 export IMAGES_PER_SHARD="${IMAGES_PER_SHARD:-500}"      # image–label pairs per shard
 export IMAGE_WIDTH="${IMAGE_WIDTH:-224}"
 export IMAGE_HEIGHT="${IMAGE_HEIGHT:-224}"
-export NUM_CLASSES="${NUM_CLASSES:-1000}"
+export NUM_CLASSES="${NUM_CLASSES:-10}"
 
 # ── WarpDrive mount paths (as seen on the VM) ────────────────
 export WD_MOUNT_POINT="${WD_MOUNT_POINT:-/wd}"

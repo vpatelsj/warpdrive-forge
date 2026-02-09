@@ -85,19 +85,12 @@ height          = int(sys.argv[5])
 num_classes     = int(sys.argv[6])
 
 def make_jpeg_bytes(w, h):
-    """Produce a minimal valid JFIF JPEG with random pixel data."""
-    # We build a tiny but valid JPEG: SOI + APP0 (JFIF) + DQT + SOF0 + DHT + SOS + raw + EOI
-    # For simplicity, we create a 1x1 JPEG and scale via the header so decoders accept it.
-    # A more realistic approach: use Pillow if available.
+    """Produce a valid JPEG with random pixel data."""
     try:
         from PIL import Image
-        img = Image.new("RGB", (w, h))
-        pixels = img.load()
-        for y in range(h):
-            for x in range(w):
-                pixels[x, y] = (random.randint(0,255), random.randint(0,255), random.randint(0,255))
+        img = Image.frombytes("RGB", (w, h), os.urandom(w * h * 3))
         buf = io.BytesIO()
-        img.save(buf, format="JPEG", quality=50)
+        img.save(buf, format="JPEG", quality=85)
         return buf.getvalue()
     except ImportError:
         pass
