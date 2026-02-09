@@ -2,7 +2,7 @@
 bin/
 *.exe
 *.out
-warpdrive-forge
+/warpdrive-forge
 
 # ── Go build caches ──────────────────────────────────────────
 .gocache/
