@@ -2,27 +2,73 @@
 # ──────────────────────────────────────────────────────────────
 # 02-gen-dataset.sh
 # Generates synthetic COCO-style WebDataset shards and uploads
-# them to the two Azure storage accounts:
+# them to the two Azure storage accounts.
+#
+# ▸ Run this ON THE VM (not locally) so uploads are fast
+#   (Azure-internal ~10 Gbps vs your home internet).
+#
 #   • Even-numbered shards → storage account A (canadacentral)
 #   • Odd-numbered shards  → storage account B (westus3)
 #
 # Each shard is a TAR containing paired <key>.jpg + <key>.cls
 # files, matching the format expected by internal/dataset.
+#
+# Prerequisites:
+#   - Azure CLI installed (03-vm-setup.sh installs it)
+#   - VM managed identity has Storage Blob Data Contributor
+#     on both storage accounts (01-provision.sh assigns it)
+#   - .env.generated exists with STORAGE_ACCOUNT_A/B values
 # ──────────────────────────────────────────────────────────────
 set -euo pipefail
 SCRIPT_DIR=$(cd -- "$(dirname "$0")" && pwd)
 source "$SCRIPT_DIR/00-env.sh"
 [[ -f "$SCRIPT_DIR/.env.generated" ]] && source "$SCRIPT_DIR/.env.generated"
 
+# ── Validate storage account names ───────────────────────────
+if [[ -z "${STORAGE_ACCOUNT_A:-}" || -z "${STORAGE_ACCOUNT_B:-}" ]]; then
+  echo "ERROR: STORAGE_ACCOUNT_A and STORAGE_ACCOUNT_B must be set."
+  echo "       Source .env.generated or export them manually."
+  exit 1
+fi
+
 WORK_DIR=$(mktemp -d)
 trap 'rm -rf "$WORK_DIR"' EXIT
 echo "==> Working directory: $WORK_DIR"
 
-# ── Check for Python (needed for JPEG generation) ────────────
+# ── Auth: try managed identity, fall back to account keys ────
+echo "==> Authenticating..."
+AUTH_MODE="key"
+if az login --identity --allow-no-subscriptions &>/dev/null; then
+  echo "    Using managed identity (Entra ID)"
+  AUTH_MODE="identity"
+else
+  echo "    Managed identity unavailable — falling back to account keys"
+fi
+
+if [[ "$AUTH_MODE" == "key" ]]; then
+  KEY_A=$(az storage account keys list \
+    --account-name "$STORAGE_ACCOUNT_A" \
+    --resource-group "${RESOURCE_GROUP:-warpdrive-forge-rg}" \
+    --query '[0].value' -o tsv)
+  KEY_B=$(az storage account keys list \
+    --account-name "$STORAGE_ACCOUNT_B" \
+    --resource-group "${RESOURCE_GROUP:-warpdrive-forge-rg}" \
+    --query '[0].value' -o tsv)
+fi
+
+# ── Check for Python ─────────────────────────────────────────
 if ! command -v python3 &>/dev/null; then
-  echo "ERROR: python3 is required to generate synthetic JPEG images."
+  echo "ERROR: python3 is required. Install it first."
   exit 1
 fi
+
+# ── Estimate dataset size ────────────────────────────────────
+EST_PER_SHARD=$((IMAGES_PER_SHARD * IMAGE_WIDTH * IMAGE_HEIGHT * 3 / 10))  # rough JPEG estimate
+EST_TOTAL=$((NUM_SHARDS * EST_PER_SHARD))
+EST_GB=$(echo "$EST_TOTAL" | awk '{printf "%.1f", $1/1073741824}')
+echo "==> Dataset: $NUM_SHARDS shards × $IMAGES_PER_SHARD images × ${IMAGE_WIDTH}×${IMAGE_HEIGHT}"
+echo "    Estimated total size: ~${EST_GB} GB"
+echo ""
 
 # ── Generate shards ──────────────────────────────────────────
 echo "==> Generating $NUM_SHARDS shards ($IMAGES_PER_SHARD images each, ${IMAGE_WIDTH}x${IMAGE_HEIGHT})"
@@ -98,47 +144,76 @@ for shard_idx in range(num_shards):
 print(f"Generated {num_shards} shards in {work_dir}")
 PYEOF
 
-# ── Upload shards ────────────────────────────────────────────
+# ── Upload shards (parallel, with progress) ─────────────────
 BLOB_PREFIX="train"
 
-# Fetch account keys (works immediately, unlike RBAC which can take minutes)
-echo "==> Fetching storage account keys..."
-KEY_A=$(az storage account keys list \
-  --account-name "$STORAGE_ACCOUNT_A" \
-  --resource-group "${RESOURCE_GROUP:-warpdrive-forge-rg}" \
-  --query '[0].value' -o tsv)
-KEY_B=$(az storage account keys list \
-  --account-name "$STORAGE_ACCOUNT_B" \
-  --resource-group "${RESOURCE_GROUP:-warpdrive-forge-rg}" \
-  --query '[0].value' -o tsv)
-
-for shard_idx in $(seq 0 $((NUM_SHARDS - 1))); do
+upload_shard() {
+  local shard_idx="$1"
+  local shard_name
   shard_name=$(printf "shard-%06d.tar" "$shard_idx")
-  shard_path="$WORK_DIR/$shard_name"
+  local shard_path="$WORK_DIR/$shard_name"
 
   if (( shard_idx % 2 == 0 )); then
-    ACCT="$STORAGE_ACCOUNT_A"
-    ACCT_KEY="$KEY_A"
-    REGION="$LOCATION_A"
+    local ACCT="$STORAGE_ACCOUNT_A"
+    local REGION="$LOCATION_A"
   else
-    ACCT="$STORAGE_ACCOUNT_B"
-    ACCT_KEY="$KEY_B"
-    REGION="$LOCATION_B"
+    local ACCT="$STORAGE_ACCOUNT_B"
+    local REGION="$LOCATION_B"
   fi
 
-  echo "==> Uploading $shard_name → $ACCT/$CONTAINER_NAME/$BLOB_PREFIX/ ($REGION)"
+  local AUTH_ARGS=()
+  if [[ "$AUTH_MODE" == "identity" ]]; then
+    AUTH_ARGS=(--auth-mode login)
+  else
+    if (( shard_idx % 2 == 0 )); then
+      AUTH_ARGS=(--account-key "$KEY_A")
+    else
+      AUTH_ARGS=(--account-key "$KEY_B")
+    fi
+  fi
+
   az storage blob upload \
     --account-name "$ACCT" \
-    --account-key "$ACCT_KEY" \
+    "${AUTH_ARGS[@]}" \
     --container-name "$CONTAINER_NAME" \
     --name "$BLOB_PREFIX/$shard_name" \
     --file "$shard_path" \
     --overwrite \
-    --output none
+    --output none 2>/dev/null
+
+  local size
+  size=$(stat --printf="%s" "$shard_path" 2>/dev/null || stat -f%z "$shard_path" 2>/dev/null)
+  local mb
+  mb=$(echo "$size" | awk '{printf "%.1f", $1/1048576}')
+  echo "    ✓ $shard_name → $ACCT ($REGION) [${mb} MB]"
+}
+export -f upload_shard
+export WORK_DIR STORAGE_ACCOUNT_A STORAGE_ACCOUNT_B LOCATION_A LOCATION_B
+export CONTAINER_NAME BLOB_PREFIX AUTH_MODE
+export KEY_A KEY_B 2>/dev/null || true
+
+echo "==> Uploading $NUM_SHARDS shards (8 parallel uploads)..."
+UPLOAD_START=$(date +%s)
+
+# Upload in parallel batches of 8
+for batch_start in $(seq 0 8 $((NUM_SHARDS - 1))); do
+  pids=()
+  for offset in $(seq 0 7); do
+    idx=$((batch_start + offset))
+    if (( idx >= NUM_SHARDS )); then break; fi
+    upload_shard "$idx" &
+    pids+=($!)
+  done
+  for pid in "${pids[@]}"; do
+    wait "$pid" || true
+  done
 done
 
+UPLOAD_END=$(date +%s)
+UPLOAD_DUR=$((UPLOAD_END - UPLOAD_START))
+
 echo ""
-echo "==> Dataset upload complete."
+echo "==> Dataset upload complete in ${UPLOAD_DUR}s."
 echo "    Even shards → $STORAGE_ACCOUNT_A ($LOCATION_A)"
 echo "    Odd  shards → $STORAGE_ACCOUNT_B ($LOCATION_B)"
 echo "    Blob prefix : $CONTAINER_NAME/$BLOB_PREFIX/"

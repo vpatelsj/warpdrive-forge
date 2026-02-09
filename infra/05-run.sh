@@ -25,9 +25,9 @@ MOUNT_BIN="$WARPDRIVE_DIR/bin/warpdrive-mount"
 CTL_BIN="$WARPDRIVE_DIR/bin/warpdrive-ctl"
 FORGE_BIN="$FORGE_DIR/bin/warpdrive-forge"
 
-TRAIN_STEPS="${TRAIN_STEPS:-200}"
-TRAIN_BATCH="${TRAIN_BATCH:-16}"
-TRAIN_WORKERS="${TRAIN_WORKERS:-4}"
+TRAIN_STEPS="${TRAIN_STEPS:-300}"
+TRAIN_BATCH="${TRAIN_BATCH:-32}"
+TRAIN_WORKERS="${TRAIN_WORKERS:-8}"
 
 # ── Colors ───────────────────────────────────────────────────
 BOLD='\033[1m'
@@ -141,11 +141,12 @@ sudo pkill -f warpdrive-mount 2>/dev/null || true
 sleep 1
 
 # Clear the local cache for a true cold start
-if [[ -d /tmp/warpdrive-cache ]]; then
-  info "Clearing local cache for clean cold start …"
-  sudo rm -rf /tmp/warpdrive-cache
+WD_CACHE_DIR="${WD_CACHE_DIR:-/mnt/nvme/warpdrive-cache}"
+if [[ -d "$WD_CACHE_DIR" ]]; then
+  info "Clearing cache at $WD_CACHE_DIR for clean cold start …"
+  sudo rm -rf "$WD_CACHE_DIR"
 fi
-mkdir -p /tmp/warpdrive-cache
+mkdir -p "$WD_CACHE_DIR"
 
 info "Starting WarpDrive FUSE mount …"
 sudo "$MOUNT_BIN" -config "$CONFIG_PATH" > /tmp/warpdrive.log 2>&1 &

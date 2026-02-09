@@ -14,7 +14,7 @@ STORAGE_ACCOUNT_A="${STORAGE_ACCOUNT_A:?Set STORAGE_ACCOUNT_A (the canadacentral
 STORAGE_ACCOUNT_B="${STORAGE_ACCOUNT_B:?Set STORAGE_ACCOUNT_B (the westus3 storage account name)}"
 CONTAINER_NAME="${CONTAINER_NAME:-coco2017-wds}"
 WD_MOUNT_POINT="${WD_MOUNT_POINT:-/wd}"
-WD_CACHE_DIR="${WD_CACHE_DIR:-/tmp/warpdrive-cache}"
+WD_CACHE_DIR="${WD_CACHE_DIR:-/mnt/nvme/warpdrive-cache}"
 WD_CACHE_SIZE="${WD_CACHE_SIZE:-50GB}"
 CONFIG_PATH="${CONFIG_PATH:-/etc/warpdrive/config.yaml}"
 
